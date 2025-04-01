@@ -211,8 +211,10 @@ sim_function <-
           #Appending the AR and MA coefficients to the dataframe
           mutate(Sim_AR_Coef = list(ar_coef),
                  Sim_MA_Coef = list(ma_coef),
-                 Sim_Corr_Order = list(corr_mod_order))
-        
+                 Sim_Corr_Order = list(corr_mod_order)) %>% 
+          #Rearranging columns to put generative model parameters 
+          #(fixed effects, random effect sds/correlations and ar/ma coefs) before the generated values
+          relocate(matches("_SD$|_Corr$|Sigma_Sq$|_Coef$|_Order$"), .after = "Sim_Fixed_Time_Cb")        
         
       return(sim_data)
   }
