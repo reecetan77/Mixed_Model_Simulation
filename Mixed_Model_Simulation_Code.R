@@ -107,7 +107,7 @@ sim_function <-
                  Sim_Fixed_Time_Sq = fixed_time_sq,
                  Sim_Fixed_Time_Cb = 0) %>% 
           #Adding random effects
-          left_joint(tibble(Subject_ID = 1:n_subject, 
+          left_join(tibble(Subject_ID = 1:n_subject, 
                             faux::rnorm_multi(
                               #number of observations
                               n = n_subject,
@@ -227,7 +227,7 @@ sim_function <-
 #cl_2 is used. If different error is encountered at any stage, the message is returned.
 
 model_function <- function(poly_order = c("Linear", "Quadratic", "Cubic"),
-                           corr_struct = c("ID", "AR(1)","MA(1)","MA(2)","ARMA(1,1)"),
+                           corr_struct = c("ID", "AR(1)","ARMA(1,1)"),
                            data_set
                            ){
   
@@ -256,8 +256,6 @@ model_function <- function(poly_order = c("Linear", "Quadratic", "Cubic"),
   modeled_corr <- switch(corr_struct,
                         "ID" = NULL,
                         "AR(1)" = corAR1(form = ~ Time | Subject_ID),
-                        "MA(1)" = corARMA(form = ~ Time | Subject_ID, p = 0, q  = 1),
-                        "MA(2)" = corARMA(form = ~ Time | Subject_ID, p = 0, q = 2),
                         "ARMA(1,1)" = corARMA(form = ~ Time | Subject_ID, p = 1, q = 1)
                         )
   
@@ -319,22 +317,18 @@ simulations <-
   expand_grid(Sim_Poly_Order = c("Linear", "Quadratic", "Cubic"),
               Subject_n = c(25,50), 
               Time_n = c(6,8),
-              Sim_Ranef_Dist = c("Normal", "Chi-sq", "Laplace"),
-              Sim_Corr_Struct = c("ID", "AR(1)","MA(1)","MA(2)","ARMA(1,1)")) %>% 
+              Sim_Corr_Struct = c("ID", "AR(1)","ARMA(1,1)")) %>% 
   mutate(Sim_Condition_ID = row_number(), .before = Sim_Poly_Order) %>% 
   mutate(Sim_Corr_Order = case_match(Sim_Corr_Struct,
                                      "ID" ~ list(c(0,0,0)),
                                     "AR(1)" ~ list(c(1,0,0)),
-                                    "MA(1)" ~ list(c(0,0,1)),
-                                    "MA(2)" ~ list(c(0,0,2)),
                                     "ARMA(1,1)" ~ list(c(1,0,1))),
          Sim_AR_Coef = case_match(Sim_Corr_Struct,
-                                  c("AR(1)", "ARMA(1,1)") ~ list(0.5),
-                                  c("ID","MA(1)","MA(2)") ~ list(NULL)),
+                                  "ID" ~ list(NULL),
+                                  c("AR(1)", "ARMA(1,1)") ~ list(0.5)),
          Sim_MA_Coef = case_match(Sim_Corr_Struct,
-                                  c("MA(1)","ARMA(1,1)") ~ list(0.5),
-                                  "MA(2)" ~ list(c(0.5,0.5)),
-                                  c("ID","AR(1)") ~ list(NULL))) %>% 
+                                  "ID" ~ list(NULL),
+                                  "ARMA(1,1)" ~ list(0.5))) %>% 
   #Repeating each condition however many times we want
   uncount(n_data_sims) %>% 
   mutate(Sim_Data_ID = row_number(), .before = Sim_Condition_ID) %>% 
@@ -355,7 +349,7 @@ simulations <-
                                       ma_coef = ..7))) %>% 
   #Adding on the modeling conditions
   #Modeled correlation structure
-  mutate(Model_Corr_Struct = list(c("ID", "AR(1)","MA(1)","MA(2)","ARMA(1,1)"))) %>% 
+  mutate(Model_Corr_Struct = list(c("ID", "AR(1)","ARMA(1,1)"))) %>% 
   unnest(Model_Corr_Struct) %>% 
   #Modeled polynomial structure
   mutate(Model_Poly_Order = case_when(
