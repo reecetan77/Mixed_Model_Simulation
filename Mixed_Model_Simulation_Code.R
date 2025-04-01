@@ -57,8 +57,6 @@ sim_function <-
            time_sq_time_cb_corr = 0.1,
            #Residual/Innovation sd
            sigma_sq = 1,
-           #Random-Effects Distribution
-           ranef_dist = c("Normal", "Chi-sq","Laplace"),
            #Within-Cluster correlation structure
            #p: autoregressive order
            #d: order of differencing
@@ -80,117 +78,66 @@ sim_function <-
       poly_order <- match.arg(poly_order)
           
       #Simulating data
-      fixed_effects <- switch(poly_order,
+      fixed_random_effects <- switch(poly_order,
                               
         "Linear" = expand_grid(Subject_ID = 1:n_subject, Time = 1:n_time) %>% 
           #Adding fixed effects
           mutate(Sim_Fixed_Intercept = fixed_intercept,
-                 Sim_Fixed_Time = fixed_time),
+                 Sim_Fixed_Time = fixed_time) %>% 
+          left_join(tibble(Subject_ID = 1:n_subject, 
+                           faux::rnorm_multi(
+                             #number of observations
+                             n = n_subject,
+                             #all of mean = 0
+                             mu = c(Sim_Rand_Intercept = 0, Sim_Rand_Time = 0),
+                             #sd for each random effect
+                             sd = c(rand_intercept_sd, rand_time_sd),
+                             #correlation matrix for random effects
+                             r = c(1, intercept_time_corr,
+                                   intercept_time_corr, 1)
+                           )), by = "Subject_ID"),
         
         "Quadratic" = expand_grid(Subject_ID = 1:n_subject, Time = 1:n_time) %>% 
           #Adding fixed effects
           mutate(Sim_Fixed_Intercept = fixed_intercept,
                  Sim_Fixed_Time = fixed_time,
-                 Sim_Fixed_Time_Sq = fixed_time_sq),
+                 Sim_Fixed_Time_Sq = fixed_time_sq) %>% 
+          left_joint(tibble(Subject_ID = 1:n_subject, 
+                            faux::rnorm_multi(
+                              #number of observations
+                              n = n_subject,
+                              #all of mean = 0
+                              mu = c(Sim_Rand_Intercept = 0, Sim_Rand_Time = 0, Sim_Rand_Time_Sq = 0),
+                              #sd for each random effect
+                              sd = c(rand_intercept_sd, rand_time_sd, rand_time_sq_sd),
+                              #correlation matrix for random effects
+                              r = c(1, intercept_time_corr, intercept_time_sq_corr,
+                                    intercept_time_corr, 1, time_time_sq_corr,
+                                    intercept_time_sq_corr, time_time_sq_corr, 1)
+                            )), by = "Subject_ID"),
         
         "Cubic" = expand_grid(Subject_ID = 1:n_subject, Time = 1:n_time) %>% 
           #Adding fixed effects
           mutate(Sim_Fixed_Intercept = fixed_intercept,
                  Sim_Fixed_Time = fixed_time,
                  Sim_Fixed_Time_Sq = fixed_time_sq,
-                 Sim_Fixed_Time_Cb = fixed_time_cb))
+                 Sim_Fixed_Time_Cb = fixed_time_cb) %>% 
+          left_join(tibble(Subject_ID = 1:n_subject, 
+                           faux::rnorm_multi(
+                             #number of observations
+                             n = n_subject,
+                             #all of mean = 0
+                             mu = c(Sim_Rand_Intercept = 0, Sim_Rand_Time = 0, Sim_Rand_Time_Sq = 0, Sim_Rand_Time_Cb = 0),
+                             #sd for each random effect
+                             sd = c(rand_intercept_sd, rand_time_sd, rand_time_sq_sd, rand_time_cb_sd),
+                             #correlation matrix for random effects
+                             r = c(1, intercept_time_corr, intercept_time_sq_corr,intercept_time_cb_corr,
+                                   intercept_time_corr, 1, time_time_sq_corr, time_time_cb_corr,
+                                   intercept_time_sq_corr, time_time_sq_corr, 1, time_sq_time_cb_corr,
+                                   intercept_time_cb_corr, time_time_cb_corr, time_sq_time_cb_corr, 1)
+                           )), by = "Subject_ID")
+        )
         
-      
-      #Random effects distribution
-      ranef_dist <- match.arg(ranef_dist)
-      
-      random_effects <- switch(poly_order,
-        
-        "Linear" = switch(ranef_dist, 
-                          
-                          "Normal" = tibble(Subject_ID = 1:n_subject, 
-                                            faux::rnorm_multi(
-                                              #number of observations
-                                              n = n_subject,
-                                              #all of mean = 0
-                                              mu = c(Sim_Rand_Intercept = 0, Sim_Rand_Time = 0),
-                                              #sd for each random effect
-                                              sd = c(rand_intercept_sd, rand_time_sd),
-                                              #correlation matrix for random effects
-                                              r = c(1, intercept_time_corr,
-                                                    intercept_time_corr, 1)
-                                              )),
-                                            
-                            "Chi-sq" = tibble(Subject_ID = 1:n_subject,
-                                              Sim_Rand_Intercept = rchisq(n = n_subject, df = 1),
-                                              Sim_Rand_Time = rchisq(n = n_subject, df = 1)),
-                                            
-                            "Laplace" = tibble(Subject_ID = 1:n_subject,
-                                               Sim_Rand_Intercept = rlaplace(n = n_subject, scale = rand_intercept_sd/sqrt(2)),
-                                               Sim_Rand_Time = rlaplace(n = n_subject, scale = rand_time_sd/sqrt(2)))                 
-                                            
-                          ),
-                               
-        "Quadratic" = switch(ranef_dist,
-            
-                             "Normal" = tibble(Subject_ID = 1:n_subject, 
-                                               faux::rnorm_multi(
-                                                 #number of observations
-                                                 n = n_subject,
-                                                 #all of mean = 0
-                                                 mu = c(Sim_Rand_Intercept = 0, Sim_Rand_Time = 0, Sim_Rand_Time_Sq = 0),
-                                                 #sd for each random effect
-                                                 sd = c(rand_intercept_sd, rand_time_sd, rand_time_sq_sd),
-                                                 #correlation matrix for random effects
-                                                 r = c(1, intercept_time_corr, intercept_time_sq_corr,
-                                                       intercept_time_corr, 1, time_time_sq_corr,
-                                                       intercept_time_sq_corr, time_time_sq_corr, 1)
-                                                 )),
-                             
-                             "Chi-sq" = tibble(Subject_ID = 1:n_subject,
-                                               Sim_Rand_Intercept = rchisq(n = n_subject, df = 1),
-                                               Sim_Rand_Time = rchisq(n = n_subject, df = 1),
-                                               Sim_Rand_Time_Sq = rchisq(n = n_subject, df = 1)),
-                             
-                             #variance for Laplace distribution 2*b^2, where b = scale parameter
-                             "Laplace" = tibble(Subject_ID = 1:n_subject,
-                                                Sim_Rand_Intercept = rlaplace(n = n_subject, scale = rand_intercept_sd/sqrt(2)),
-                                                Sim_Rand_Time = rlaplace(n = n_subject, scale = rand_time_sd/sqrt(2)),
-                                                Sim_Rand_Time_Sq = rlaplace(n = n_subject, scale = rand_time_sq_sd/sqrt(2)))                 
-                             
-                             ),
-                               
-        "Cubic" = switch(ranef_dist,
-                               
-                        "Normal" = tibble(Subject_ID = 1:n_subject, 
-                                          faux::rnorm_multi(
-                                          #number of observations
-                                            n = n_subject,
-                                            #all of mean = 0
-                                            mu = c(Sim_Rand_Intercept = 0, Sim_Rand_Time = 0, Sim_Rand_Time_Sq = 0, Sim_Rand_Time_Cb = 0),
-                                            #sd for each random effect
-                                            sd = c(rand_intercept_sd, rand_time_sd, rand_time_sq_sd, rand_time_cb_sd),
-                                            #correlation matrix for random effects
-                                            r = c(1, intercept_time_corr, intercept_time_sq_corr,intercept_time_cb_corr,
-                                                  intercept_time_corr, 1, time_time_sq_corr, time_time_cb_corr,
-                                                  intercept_time_sq_corr, time_time_sq_corr, 1, time_sq_time_cb_corr,
-                                                  intercept_time_cb_corr, time_time_cb_corr, time_sq_time_cb_corr, 1)
-                                            )),
-            
-                         "Chi-sq" = tibble(Subject_ID = 1:n_subject,
-                                           Sim_Rand_Intercept = rchisq(n = n_subject, df = 1),
-                                           Sim_Rand_Time = rchisq(n = n_subject, df = 1),
-                                           Sim_Rand_Time_Sq = rchisq(n = n_subject, df = 1),
-                                           Sim_Rand_Time_Cb = rchisq(n = n_subject, df = 1)),
-                      
-                        #variance for Laplace distribution 2*b^2, where b = scale parameter
-                        "Laplace" = tibble(Subject_ID = 1:n_subject,
-                                           Sim_Rand_Intercept = rlaplace(n = n_subject, scale = rand_intercept_sd/sqrt(2)),
-                                           Sim_Rand_Time = rlaplace(n = n_subject, scale = rand_time_sd/sqrt(2)),
-                                           Sim_Rand_Time_Sq = rlaplace(n = n_subject, scale = rand_time_sq_sd/sqrt(2)),
-                                           Sim_Rand_Time_Cb = rlaplace(n = n_subject, scale = rand_time_cb_sd/sqrt(2)))
-        
-      ))
       
       #Error Terms
       #Model order c(p,d,q)
