@@ -83,7 +83,10 @@ sim_function <-
         "Linear" = expand_grid(Subject_ID = 1:n_subject, Time = 1:n_time) %>% 
           #Adding fixed effects
           mutate(Sim_Fixed_Intercept = fixed_intercept,
-                 Sim_Fixed_Time = fixed_time) %>% 
+                 Sim_Fixed_Time = fixed_time,
+                 Sim_Fixed_Time_Sq = 0,
+                 Sim_Fixed_Time_Cb = 0) %>% 
+          #Adding random effects
           left_join(tibble(Subject_ID = 1:n_subject, 
                            faux::rnorm_multi(
                              #number of observations
@@ -101,7 +104,9 @@ sim_function <-
           #Adding fixed effects
           mutate(Sim_Fixed_Intercept = fixed_intercept,
                  Sim_Fixed_Time = fixed_time,
-                 Sim_Fixed_Time_Sq = fixed_time_sq) %>% 
+                 Sim_Fixed_Time_Sq = fixed_time_sq,
+                 Sim_Fixed_Time_Cb = 0) %>% 
+          #Adding random effects
           left_joint(tibble(Subject_ID = 1:n_subject, 
                             faux::rnorm_multi(
                               #number of observations
@@ -122,6 +127,7 @@ sim_function <-
                  Sim_Fixed_Time = fixed_time,
                  Sim_Fixed_Time_Sq = fixed_time_sq,
                  Sim_Fixed_Time_Cb = fixed_time_cb) %>% 
+          #Adding random effects
           left_join(tibble(Subject_ID = 1:n_subject, 
                            faux::rnorm_multi(
                              #number of observations
@@ -137,7 +143,6 @@ sim_function <-
                                    intercept_time_cb_corr, time_time_cb_corr, time_sq_time_cb_corr, 1)
                            )), by = "Subject_ID")
         )
-        
       
       #Error Terms
       #Model order c(p,d,q)
@@ -146,15 +151,21 @@ sim_function <-
       #q: moving average order
       
       #Combining fixed and random effects, adding error term outcome column
-      sim_data <- fixed_effects %>% 
-        left_join(random_effects, by = "Subject_ID") %>% 
+      sim_data <- fixed_random_effects %>% 
         group_by(Subject_ID) %>% 
         mutate(
         bind_cols(switch(poly_order,
                          
                  "Linear" = tibble(Sim_Rand_Intercept_SD = rand_intercept_sd,
                                    Sim_Rand_Time_SD = rand_time_sd,
+                                   Sim_Rand_Time_Sq_SD = 0,
+                                   Sim_Rand_Time_Cb_SD = 0,
                                    Sim_Rand_Intercept_Time_Corr = intercept_time_corr,
+                                   Sim_Rand_Intercept_Time_Sq_Corr = NA,
+                                   Sim_Rand_Intercept_Time_Cb_Corr = NA,
+                                   Sim_Rand_Time_Time_Sq_Corr = NA,
+                                   Sim_Rand_Time_Time_Cb_Corr = NA,
+                                   Sim_Rand_Time_Sq_Time_Cb_Corr = NA,
                                    Sim_Sigma_Sq = sigma_sq,
                                    Sim_Residual = as.numeric(arima.sim(model = list(order = corr_mod_order, ar = ar_coef, ma = ma_coef), sd = sigma_sq, n = n_time)),
                                    Sim_Outcome = (Sim_Fixed_Intercept + Sim_Rand_Intercept) + 
@@ -165,9 +176,13 @@ sim_function <-
                  "Quadratic" = tibble(Sim_Rand_Intercept_SD = rand_intercept_sd,
                                       Sim_Rand_Time_SD = rand_time_sd,
                                       Sim_Rand_Time_Sq_SD = rand_time_sq_sd,
+                                      Sim_Rand_Time_Cb_SD = 0,
                                       Sim_Rand_Intercept_Time_Corr = intercept_time_corr,
                                       Sim_Rand_Intercept_Time_Sq_Corr = intercept_time_sq_corr,
+                                      Sim_Rand_Intercept_Time_Cb_Corr = NA,
                                       Sim_Rand_Time_Time_Sq_Corr = time_time_sq_corr,
+                                      Sim_Rand_Time_Time_Cb_Corr = NA,
+                                      Sim_Rand_Time_Sq_Time_Cb_Corr = NA,
                                       Sim_Residual = as.numeric(arima.sim(model = list(order = corr_mod_order, ar = ar_coef, ma = ma_coef), sd = sigma_sq, n = n_time)),
                                       Sim_Outcome = (Sim_Fixed_Intercept + Sim_Rand_Intercept) + 
                                         (Sim_Fixed_Time + Sim_Rand_Time)*Time + 
@@ -193,26 +208,10 @@ sim_function <-
                                   )
         ))) %>% 
           ungroup() %>% 
-          #Appending the generative distribution of random effects to data set
-          mutate(Sim_Ranef_Dist = ranef_dist,
-                 Sim_AR_Coef = list(ar_coef),
+          #Appending the AR and MA coefficients to the dataframe
+          mutate(Sim_AR_Coef = list(ar_coef),
                  Sim_MA_Coef = list(ma_coef),
                  Sim_Corr_Order = list(corr_mod_order))
-      
-          #Dropping irrelevant sd's and correlations from sim_data if Laplace or Chi-sq ranef dist was utilized
-         sim_data <- if(ranef_dist == "Chi-sq"){
-           
-           sim_data %>% dplyr::select_at(vars(-contains(c("SD","Corr"))))
-           
-         } else if(ranef_dist == "Laplace"){
-           
-           sim_data %>% dplyr::select_at(vars(-contains("Corr")))
-           
-         } else if(ranef_dist == "Normal"){
-           
-           sim_data
-           
-         }
         
         
       return(sim_data)
