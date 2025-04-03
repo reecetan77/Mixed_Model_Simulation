@@ -8,6 +8,7 @@ library(qqplotr)
 library(furrr)
 library(tictoc)
 library(AICcmodavg)
+library(parallel)
 
 #Clearing environment
 rm(list=ls())
@@ -56,7 +57,7 @@ sim_function <-
            time_time_cb_corr = 0.1,
            time_sq_time_cb_corr = 0.1,
            #Residual/Innovation sd
-           sigma_sq = 1,
+           resid_sd = 1,
            #Within-Cluster correlation structure
            #p: autoregressive order
            #d: order of differencing
@@ -166,8 +167,8 @@ sim_function <-
                                    Sim_Rand_Time_Time_Sq_Corr = NA,
                                    Sim_Rand_Time_Time_Cb_Corr = NA,
                                    Sim_Rand_Time_Sq_Time_Cb_Corr = NA,
-                                   Sim_Sigma_Sq = sigma_sq,
-                                   Sim_Residual = as.numeric(arima.sim(model = list(order = corr_mod_order, ar = ar_coef, ma = ma_coef), sd = sigma_sq, n = n_time)),
+                                   Sim_Resid_SD = resid_sd,
+                                   Sim_Residual = as.numeric(arima.sim(model = list(order = corr_mod_order, ar = ar_coef, ma = ma_coef), sd = resid_sd, n = n_time)),
                                    Sim_Outcome = (Sim_Fixed_Intercept + Sim_Rand_Intercept) + 
                                      (Sim_Fixed_Time + Sim_Rand_Time)*Time + 
                                      Sim_Residual
@@ -183,7 +184,8 @@ sim_function <-
                                       Sim_Rand_Time_Time_Sq_Corr = time_time_sq_corr,
                                       Sim_Rand_Time_Time_Cb_Corr = NA,
                                       Sim_Rand_Time_Sq_Time_Cb_Corr = NA,
-                                      Sim_Residual = as.numeric(arima.sim(model = list(order = corr_mod_order, ar = ar_coef, ma = ma_coef), sd = sigma_sq, n = n_time)),
+                                      Sim_Resid_SD = resid_sd,
+                                      Sim_Residual = as.numeric(arima.sim(model = list(order = corr_mod_order, ar = ar_coef, ma = ma_coef), sd = resid_sd, n = n_time)),
                                       Sim_Outcome = (Sim_Fixed_Intercept + Sim_Rand_Intercept) + 
                                         (Sim_Fixed_Time + Sim_Rand_Time)*Time + 
                                         (Sim_Fixed_Time_Sq + Sim_Rand_Time_Sq)*Time^2 + 
@@ -200,8 +202,8 @@ sim_function <-
                                   Sim_Rand_Time_Time_Sq_Corr = time_time_sq_corr,
                                   Sim_Rand_Time_Time_Cb_Corr = time_time_cb_corr,
                                   Sim_Rand_Time_Sq_Time_Cb_Corr = time_sq_time_cb_corr,
-                                  Sim_Sigma_Sq = sigma_sq,
-                                  Sim_Residual = as.numeric(arima.sim(model = list(order = corr_mod_order, ar = ar_coef, ma = ma_coef), sd = sigma_sq, n = n_time)),
+                                  Sim_Resid_SD = resid_sd,
+                                  Sim_Residual = as.numeric(arima.sim(model = list(order = corr_mod_order, ar = ar_coef, ma = ma_coef), sd = resid_sd, n = n_time)),
                                   Sim_Outcome = (Sim_Fixed_Intercept + Sim_Rand_Intercept) + (Sim_Fixed_Time + Sim_Rand_Time)*Time + 
                                     (Sim_Fixed_Time_Sq + Sim_Rand_Time_Sq)*Time^2 + (Sim_Fixed_Time_Cb + Sim_Rand_Time_Cb)*Time^3 +
                                     Sim_Residual
@@ -214,7 +216,7 @@ sim_function <-
                  Sim_Corr_Order = list(corr_mod_order)) %>% 
           #Rearranging columns to put generative model parameters 
           #(fixed effects, random effect sds/correlations and ar/ma coefs) before the generated values
-          relocate(matches("_SD$|_Corr$|Sigma_Sq$|_Coef$|_Order$"), .after = "Sim_Fixed_Time_Cb")        
+          relocate(matches("_SD$|_Corr$|Resid_SD$|_Coef$|_Order$"), .after = "Sim_Fixed_Time_Cb")        
         
       return(sim_data)
   }
@@ -304,62 +306,157 @@ model_function <- function(poly_order = c("Linear", "Quadratic", "Cubic"),
 }
 
 
+
+#Plan for parallel processing
+plan(multisession, workers = detectCores() - 1)
+options(future.rng.onMisuse = "ignore")
+
 #Number of simulated data sets for each condition
 n_data_sims <- 3
 
-#Plan for parallel processing
-plan(multisession, workers = 6)
-options(future.rng.onMisuse = "ignore")
+#Setting generative fixed effects
+sim_fixed_intercept <- 5
+sim_fixed_time <- 3
+sim_fixed_time_sq <- -1
+sim_fixed_time_cb <- -0.5
 
-tic()
-simulations <- 
-  #Obtaining combinations of each condition: Subject_n, Time_n, Sim_Ranef_Dist, Sim_Corr_Struct,
-  expand_grid(Sim_Poly_Order = c("Linear", "Quadratic", "Cubic"),
-              Subject_n = c(25,50), 
-              Time_n = c(6,8),
-              Sim_Corr_Struct = c("ID", "AR(1)","ARMA(1,1)")) %>% 
+#Setting generative AR and MA coefficients
+sim_ar_coef <- 0.5
+sim_ma_coef <- 0.5
+
+#Setting generative correlation structures
+sim_corr_struct <- c("ID", "AR(1)","ARMA(1,1)")
+
+#Setting generative random effect sd's
+#Vector contains a "smaller" and "larger" value for each polynomial order
+sim_rand_intercept_sd <- c(1,3)
+sim_rand_time_sd <- c(1,3)
+sim_rand_time_sq_sd <- c(1,3)
+sim_rand_time_cb_sd <- c(1,3)
+
+#Setting generative residual sd
+#Vector contains a "smaller" and "larger" value
+sim_resid_sd <- c(1,3)
+
+#Creating smaller subset of simulation conditions and models to use for adding model metrics
+#function to sample n simulative conditions
+sample_n_of <- function(data, size, ...) {
+  dots <- quos(...)
+  
+  group_ids <- data %>% 
+    group_by(!!! dots) %>% 
+    group_indices()
+  
+  sampled_groups <- sample(unique(group_ids), size)
+  
+  data %>% 
+    filter(group_ids %in% sampled_groups)
+}
+
+
+#Parameter grid for simulations
+sim_paramater_grid <- 
+  #Obtaining combinations of each condition: Polynomial Order, Subject_n, Time_n,
+  expand_grid(#Generative Polynomial Order
+              Sim_Poly_Order = c("Linear", "Quadratic", "Cubic"),
+              #Number of Subjects
+              Subject_n = c(25,50),
+              #Number of Time points
+              Time_n = c(6,8)) %>% 
+  #Adding fixed effects that are constant across all conditions
+  mutate(Sim_Fixed_Intercept = sim_fixed_intercept,
+         Sim_Fixed_Time = sim_fixed_time,
+         Sim_Fixed_Time_Sq = ifelse(Sim_Poly_Order != "Linear", sim_fixed_time_sq, 0),
+         Sim_Fixed_Time_Cb = ifelse(Sim_Poly_Order == "Cubic", sim_fixed_time_cb, 0)) %>% 
+  #Adding random effect sds, residual sd and level-1 correlation structures
+  mutate(Sim_Rand_Intercept_SD = list(sim_rand_intercept_sd),
+         Sim_Rand_Time_SD = list(sim_rand_time_sd),
+         Sim_Rand_Time_Sq_SD = ifelse(Sim_Poly_Order == "Linear", 0, list(sim_rand_time_sq_sd)),
+         Sim_Rand_Time_Cb_SD = ifelse(Sim_Poly_Order == "Cubic", list(sim_rand_time_cb_sd), 0),
+         Sim_Resid_SD = list(sim_resid_sd),
+         Sim_Corr_Struct = list(sim_corr_struct)) %>% 
+  #Unnesting list columns to obtain all combinations of generative parameters
+  unnest(Sim_Rand_Intercept_SD) %>% 
+  unnest(Sim_Rand_Time_SD) %>% 
+  unnest(Sim_Rand_Time_Sq_SD) %>% 
+  unnest(Sim_Rand_Time_Cb_SD) %>% 
+  unnest(Sim_Resid_SD) %>% 
+  unnest(Sim_Corr_Struct) %>% 
+  #Adding IDs to each generative condition
   mutate(Sim_Condition_ID = row_number(), .before = Sim_Poly_Order) %>% 
+  #Adding generative correlation order and ar/ma coefficients 
   mutate(Sim_Corr_Order = case_match(Sim_Corr_Struct,
                                      "ID" ~ list(c(0,0,0)),
                                     "AR(1)" ~ list(c(1,0,0)),
                                     "ARMA(1,1)" ~ list(c(1,0,1))),
          Sim_AR_Coef = case_match(Sim_Corr_Struct,
                                   "ID" ~ list(NULL),
-                                  c("AR(1)", "ARMA(1,1)") ~ list(0.5)),
+                                  c("AR(1)", "ARMA(1,1)") ~ list(sim_ar_coef)),
          Sim_MA_Coef = case_match(Sim_Corr_Struct,
                                   "ID" ~ list(NULL),
-                                  "ARMA(1,1)" ~ list(0.5))) %>% 
+                                  "ARMA(1,1)" ~ list(sim_ma_coef))) %>% 
   #Repeating each condition however many times we want
   uncount(n_data_sims) %>% 
-  mutate(Sim_Data_ID = row_number(), .before = Sim_Condition_ID) %>% 
+  mutate(Sim_Data_ID = row_number(), .before = Sim_Condition_ID) 
+
+#Simulating data based on grid parameters
+sim_data <-
+  sim_paramater_grid %>% 
+  sample_n_of(10, Sim_Condition_ID) %>% 
   #Simulating data based on conditions in each row
-  mutate(Sim_Data = future_pmap(list(Sim_Poly_Order,
+  mutate(Sim_Data = future_pmap(list(
+                              #Poly order
+                              Sim_Poly_Order,
+                              #Number of Subjects
                               Subject_n,
+                              #Number of timepoints
                               Time_n,
-                              Sim_Ranef_Dist,
+                              #Fixed effects
+                              Sim_Fixed_Intercept,
+                              Sim_Fixed_Time,
+                              Sim_Fixed_Time_Sq,
+                              Sim_Fixed_Time_Cb,
+                              #Random effects
+                              Sim_Rand_Intercept_SD,
+                              Sim_Rand_Time_SD,
+                              Sim_Rand_Time_Sq_SD,
+                              Sim_Rand_Time_Cb_SD,
+                              #Residual sd
+                              Sim_Resid_SD,
+                              #Level-1 correlation structure
                               Sim_Corr_Order,
                               Sim_AR_Coef,
                               Sim_MA_Coef),
                          ~sim_function(poly_order = ..1,
                                       n_subject = ..2,
                                       n_time = ..3,
-                                      ranef_dist = ..4,
-                                      corr_mod_order = ..5,
-                                      ar_coef = ..6,
-                                      ma_coef = ..7))) %>% 
+                                      fixed_intercept = ..4,
+                                      fixed_time = ..5,
+                                      fixed_time_sq = ..6,
+                                      fixed_time_cb = ..7,
+                                      rand_intercept_sd = ..8,
+                                      rand_time_sd = ..9,
+                                      rand_time_sq_sd = ..10,
+                                      rand_time_cb_sd = ..11,
+                                      resid_sd = ..12, 
+                                      corr_mod_order = ..13,
+                                      ar_coef = ..14,
+                                      ma_coef = ..15)))
+tic()
+#Modeling data using different combinations of polynomial orders and level-1 correlation structures
+sim_data_models <- sim_data %>% 
   #Adding on the modeling conditions
   #Modeled correlation structure
   mutate(Model_Corr_Struct = list(c("ID", "AR(1)","ARMA(1,1)"))) %>% 
   unnest(Model_Corr_Struct) %>% 
   #Modeled polynomial structure
-  mutate(Model_Poly_Order = case_when(
-                                  Sim_Poly_Order == "Linear" ~ list("Linear"),
-                                  Sim_Poly_Order == "Quadratic" ~ list(c("Linear", "Quadratic")),
-                                  Sim_Poly_Order == "Cubic" ~ list(c("Linear", "Quadratic", "Cubic"))
-                                  )
-         ) %>% 
+  mutate(Model_Poly_Order = list(c("Linear", "Quadratic", "Cubic"))) %>% 
   #Unnesting Model_Poly_Order to obtain make sure lower order polynomial terms are modeled for each simulated dataset
   unnest(Model_Poly_Order) %>% 
+  #Adding ID to each model condition
+  mutate(group_key = paste(Model_Corr_Struct, Model_Poly_Order, sep = "_")) %>% 
+  mutate(Model_ID = dense_rank(factor(group_key, levels = unique(group_key))), .before = Model_Corr_Struct) %>% 
+  dplyr::select(-group_key) %>% 
   #Running models on each data set according to correlation structure specified in Model_Corr_Struct column
   #Also extracting the apVar object from the model fit. This represents the approximate Variance-Covariance matrix
   #of the random effect estimates and can produce NAs or singularities without throwing a warning/error in model fit
@@ -367,8 +464,10 @@ simulations <-
            future_pmap(list(Model_Poly_Order, Model_Corr_Struct, Sim_Data), 
                        ~ model_function(poly_order = ..1, corr_struct = ..2, data_set = ..3)),
          Model_apVar = map(Model_Result, "apVar")) 
-
 toc()
+
+
+
 
 dir <- "/Users/Tanner/Desktop/Keith and Tanner Correlation Specification Paper/Mixed_Model_Sims_"
 
@@ -379,44 +478,15 @@ dir <- "/Users/Tanner/Desktop/Keith and Tanner Correlation Specification Paper/M
 ###Adding Model Performance Metrics
 #Tabulating Proportions of Models that Ran with Errors/Convergence Issues
 model_convergence_issues <-
-  simulations %>% group_by(Subject_n, Time_n, Sim_Poly_Order, Model_Poly_Order, Sim_Corr_Struct, Model_Corr_Struct) %>%
+  sim_data_models %>% group_by(Subject_n, Time_n, Sim_Poly_Order, Model_Poly_Order, Sim_Corr_Struct, Model_Corr_Struct) %>%
   summarize(Convergence_Issue_Count = sum(map_lgl(Model_Result, ~ class(.x) == "character")),
             Convergence_Issue_Prop = round(Convergence_Issue_Count/n(), digits = 3), .groups = "drop")
 
 #Tabulating Proportion of models that ran with issues in apVar
 model_apvar_issues <-
-  simulations %>% group_by(Subject_n, Time_n, Sim_Poly_Order, Model_Poly_Order, Sim_Corr_Struct, Model_Corr_Struct) %>%
+  sim_data_models %>% group_by(Subject_n, Time_n, Sim_Poly_Order, Model_Poly_Order, Sim_Corr_Struct, Model_Corr_Struct) %>%
   summarize(apVar_Issue_Count = sum(map_lgl(Model_apVar, ~ length(class(.x)) == 1 & "character" %in% class(.x))),
             apVar_Issue_Prop = round(apVar_Issue_Count/n(), digits = 3), .groups = "drop")
-
-
-#Wald Test Statistic Function (used to calculate empirical Type I error rate for fixed effects)
-#wald_function <- function(data_col_, model_col_, fixef_name_){
-
-  wald_stat <- map2_dbl(data_col_, model_col_, function(data_,model_){
-
-    #Fixed effect population parameter
-    fixef_param <- data_ %>% dplyr::select(matches(paste0("Fixed_",fixef_name_))) %>%
-      unique() %>% as.numeric()
-
-    #Fixed effect model summary
-    fixef_mod_summary <- as.data.frame(summary(model_)$tTable) %>% rownames_to_column(var = "Fixef")
-
-    #Fixed effect model estimate
-    fixef_est <- fixef_mod_summary %>% filter(str_detect(Fixef, pattern = fixef_name_)) %>% pull(Value)
-
-    #Fixed effect model standard error
-    fixef_se <- fixef_mod_summary %>% filter(str_detect(Fixef, pattern = fixef_name_)) %>% pull(Std.Error)
-
-    stat <- (fixef_est - fixef_param)/fixef_se
-
-    return(stat)
-
-  }
-   )
-
-  return(wald_stat)
-}
 
 
 #Function that creates named vector of random effect variances
@@ -433,9 +503,8 @@ ranef_extractor <- function(model){
 }
 
 
-
 ##Removing models that ran with issues for this data frame
-sim_model_metrics <- simulations %>% 
+sim_model_metrics <- sim_data_models %>% 
   filter(map_lgl(Model_Result, ~ class(.x) != "character")) %>% 
   #Dropping irrelevant columns 
   dplyr::select(-Sim_Corr_Order, -Model_apVar) %>% 
@@ -456,60 +525,15 @@ sim_model_metrics <- simulations %>%
   unnest_wider(Model_Rand, names_sep = "_") %>% 
   #Tidying column names
   rename_with(~ str_remove_all(., "\\(|\\)|I\\(")) %>% 
-  rename_with(~ str_replace_all(., c("\\^2" = "_Sq","\\^3" = "_Cb", "Rand_Residual" = "Sigma_Sq"))) %>% 
-  rename_with(~ paste0(., "_SD"), .cols = contains("Rand"))
-
-
-
-#Function to calculate relative bias for model estimates
-rel_bias <- function(data_col, param_name_, model_col_){
-  
-  if(param_name_ %in% names(data_col)){
-    
-    param <- unique(data_col[[param_name_]])
-    
-    rel_bias <- (model_col_ - param)/param %>% as.double()
-    
-  } else {rel_bias = NA_real_}
-  
-  
-  return(rel_bias)
-}
-
-##Calculating Relative Biases for fixed effects and random effect estimates
-sim_rel_bias <- 
-  sim_model_metrics %>% 
-  dplyr::select(-c(Model_AIC:Model_BIC)) %>% 
-  mutate(across(matches("Fixed|Rand|Sigma"),
-                ~ map2_dbl(Sim_Data, .x, 
-                           ~ rel_bias(data_col = .x, 
-                                      param_name_ = paste0("Sim_", str_remove(cur_column(), "^Model_")), 
-                                      model_col_ = .y)),
-                .names = "Rel_Bias_{.col}")) %>% 
-  rename_with(~str_remove(., pattern = "_Model"), starts_with("Rel_Bias"))
-  
+  rename_with(~ str_replace_all(., c("\\^2" = "_Sq","\\^3" = "_Cb", "Rand_Residual" = "Resid_SD"))) %>% 
+  rename_with(~ paste0(., "_SD"), .cols = contains("Model_Rand"))
 
 
 
 
-
-# ##Model Comparisons LRT for all models
-# sim_model_lrt <-
-#   sim_model_metrics %>% 
-#   group_by(Sim_Data_ID) %>% 
-#   mutate(
-#     LRT = list(do.call(anova, Model_Result)),
-#     LRT = map(LRT, ~ .x %>% 
-#                 dplyr::select(-call) %>% 
-#                 mutate(Sim_Corr_Struct = Sim_Corr_Struct, .before = Model) %>% 
-#                 mutate(Sim_Data_ID = Sim_Data_ID, .before = 1) %>% 
-#                 tibble()),
-#     Correlations = list(unique(Model_Corr_Struct)),
-#     LRT = map2(LRT, Correlations, ~ .x %>% mutate(Model_Corr_Struct = .y, .after = Sim_Corr_Struct))
-#   ) %>% dplyr::select(-Correlations)
   
 #Tabulating which models are the best fit to each dataset using AIC, AICc, and BIC
-sim_model_comparisons <- 
+sim_model_IC_comparisons <- 
   sim_model_metrics %>% 
   dplyr::select(-Sim_Data, -Model_Result, - Sim_AR_Coef, - Sim_MA_Coef, -c(Model_Fixed_Intercept:Model_Rand_Time_Cb_SD)) %>% 
   relocate(Sim_Poly_Order, .after = Sim_Corr_Struct) %>% 
@@ -534,9 +558,72 @@ sim_model_comparisons <-
   unite(BIC_Best_Model, starts_with("BIC_Model"), sep = ", ", remove = FALSE) %>% 
   relocate(Sim_Model, AIC_Best_Model, AICc_Best_Model, BIC_Best_Model, .after = Sim_Poly_Order)
 
-sim_model_comparisons %>% 
+sim_model_IC_comparisons %>% 
   dplyr::summarize(AIC_Prop = mean(Sim_Model == AIC_Best_Model),
                    AICc_Prop = mean(Sim_Model == AICc_Best_Model),
                    BIC_Prop = mean(Sim_Model == BIC_Best_Model))
 
+#Adding Bias and Precision Metrics for Bias and Precision
+col_names <- names(sim_model_metrics %>% 
+                     dplyr::select(matches("Fixed|Rand|Resid")))
+#Pulls suffixes out
+suffixes <- unique(str_extract(col_names, "_.*$"))
+
+sim_model_bias_precision <- sim_model_metrics %>% 
+  #Mutating across all columns that start with "Sim_" and have a suffix of "Fixed", "Rand" or "Resid
+  mutate(across(
+    all_of(names(.)[str_detect(names(.), paste0("^Sim*(", paste(suffixes, collapse = "|"),")$"))]),
+    #Calculating difference and squared difference each column from its counterpart that starts with "Model"
+    .fns = list(
+      Diff = ~ sim_model_metrics[[sub("^Sim_", "Model_", cur_column())]] - .,
+      Diff_Sq = ~ (sim_model_metrics[[sub("^Sim_", "Model_", cur_column())]] - .)^2
+    ))) %>% 
+  rename_with(~ str_remove(.x, "^Sim_"), matches("Diff|Diff_Sq")) %>% 
+  #Computing Bias and Precision for each Sim_ID and Model_ID combination
+  group_by(Sim_Condition_ID, Model_ID) %>% 
+  #Averaging differences between simulation parameter and model estimate for bias
+  dplyr::mutate(across(ends_with("_Diff"), ~ mean(.x, na.rm = TRUE), .names = "{.col}_Bias")) %>% 
+  #Taking sqrt of average squared differences between simulation parameter and model estimate for precision
+  dplyr::mutate(across(ends_with("_Diff_Sq"), ~ sqrt(mean(.x, na.rm = TRUE)), .names = "{.col}_Precision")) %>% 
+  #Modifying column names
+  rename_with(~ str_remove(.x, "_Diff"), contains("Diff_Bias")) %>% 
+  rename_with(~ str_remove(.x, "_Diff_Sq"), contains("Diff_Sq_Precision")) %>% 
+  #Selecting relevant columns
+  dplyr::select(c(Sim_Condition_ID:Time_n, Sim_Resid_SD, Sim_Corr_Struct, Model_ID:Model_Poly_Order), 
+                matches("Bias|Precision")) %>% 
+  #Rearranging to get bias and precision next to each other for each term
+  dplyr::select(c(Sim_Condition_ID:Model_Poly_Order), 
+                matches(paste0(rep(str_remove(suffixes, "^_"), each = 2), c("_Bias","_Precision"))))
+  distinct() %>% 
+  ungroup()
+  
+  
+#Adding Model p-values for fixed effects t-tests
+#Function to extract p-values and put them in table that follows naming convention
+p_value_function <- function(model_){
+  
+p_vals <- summary(model_)$tTable %>% 
+  data.frame() %>% 
+  rownames_to_column(var = "Term") %>% 
+  mutate(Term = case_match(Term,
+                           "(Intercept)" ~ "Model_Fixed_Intercept",
+                           "Time" ~ "Model_Fixed_Time",
+                           "I(Time^2)" ~ "Model_Fixed_Time_Sq",
+                           "I(Time^3)" ~ "Model_Fixed_Time_Cb")) %>% 
+  dplyr::select(Term, p.value) %>% 
+  pivot_wider(names_from = Term, values_from = p.value) %>% 
+  rename_with(~ paste0(.x,"_p_value"), everything())
+  
+return(p_vals)
+}
+
+#Data frame to hold p-values
+sim_model_p_values <-
+  sim_model_metrics %>% 
+  dplyr::select(Sim_Data_ID:Model_Result) %>% 
+  mutate(p_values = map(Model_Result, ~p_value_function(.x))) %>% 
+  unnest_wider(p_values) %>% 
+  dplyr::select(-Sim_Data,-Model_Result)
+
+  
 
