@@ -16,11 +16,11 @@ rm(list=ls())
 #Control statements for model fitting
 cl_1 <- lmeControl(maxIter = 1000, msMaxIter = 1000, niterEM = 1000,
                  msMaxEval = 1000, opt = c("optim"), optimMethod = "BFGS",
-                 returnObject = FALSE)
+                 returnObject = FALSE, apVar = FALSE)
 
 cl_2 <- lmeControl(maxIter = 1000, msMaxIter = 1000, niterEM = 1000, 
   msMaxEval = 1000, opt = "nlminb",
-  returnObject = FALSE)
+  returnObject = FALSE, apVar = FALSE)
 
 
 cl_a <- lmerControl(optimizer = "bobyqa",
@@ -230,27 +230,22 @@ sim_function <-
 
 model_function <- function(poly_order = c("Linear", "Quadratic", "Cubic"),
                            corr_struct = c("ID", "AR(1)","ARMA(1,1)"),
-                           data_set
-                           ){
+                           data_set){
   
   poly_order <- match.arg(poly_order)
   
-  #Fixed effects and random effects formulas based on poly_order
-  model_formulas <- switch(poly_order,
-                           "Linear" = list(fixef_formula = "Sim_Outcome ~ 1 + Time",
-                                           ranef_formula = "~ 1 + Time | Subject_ID"),
-                           
-                           "Quadratic" = list(fixef_formula = "Sim_Outcome ~ 1 + Time + I(Time^2)",
-                                              ranef_formula = "~ 1 + Time + I(Time^2) | Subject_ID"),
-                           
-                           "Cubic" = list(fixef_formula = "Sim_Outcome ~ 1 + Time + I(Time^2) + I(Time^3)",
-                                          ranef_formula = "~ 1 + Time + I(Time^2) + I(Time^3) | Subject_ID")
-                           
-                           )
+  #Predefined formulas
+  fixef_formula <- list(
+    Linear = Sim_Outcome ~ 1 + Time,
+    Quadratic = Sim_Outcome ~ 1 + Time + I(Time^2),
+    Cubic = Sim_Outcome ~ 1 + Time + I(Time^2) + I(Time^3)
+  )
   
-  #Extracting fixed and random effects formulas as variables
-  fixef_formula <- model_formulas$fixef_formula
-  ranef_formula <- model_formulas$ranef_formula
+  ranef_formula <- list(
+    Linear = ~ 1 + Time | Subject_ID,
+    Quadratic = ~ 1 + Time + I(Time^2) | Subject_ID,
+    Cubic = ~ 1 + Time + I(Time^2) + I(Time^3) | Subject_ID
+  )
   
   #Correlation structure to be included in the model
   corr_struct <- match.arg(corr_struct)
@@ -265,12 +260,11 @@ model_function <- function(poly_order = c("Linear", "Quadratic", "Cubic"),
   sim_mod <- tryCatch(
             #Attempt to fit model with the control statement
     suppressMessages(
-            lme(fixed = as.formula(fixef_formula), 
-                 random = as.formula(ranef_formula),
+            lme(fixed = fixef_formula[[poly_order]], 
+                 random = ranef_formula[[poly_order]],
                  correlation = modeled_corr, 
                  data = data_set,
-                 #Using ML for LRT tests
-                 method = "REML",
+                 method = "ML",
                  control = cl_1)),
             
             error = function(e){
@@ -281,11 +275,11 @@ model_function <- function(poly_order = c("Linear", "Quadratic", "Cubic"),
             #Retrying without control
             retry_mod <- tryCatch(
               suppressMessages(
-                lme(fixed = as.formula(fixef_formula),
-                    random = as.formula(ranef_formula),
+                lme(fixed = fixef_formula[[poly_order]],
+                    random = ranef_formula[[poly_order]],
                     correlation = modeled_corr,
                     data = data_set,
-                    method = "REML",
+                    method = "ML",
                     control = cl_2)),
                 
                 error = function(e2){
@@ -312,7 +306,7 @@ plan(multisession, workers = detectCores() - 2)
 options(future.rng.onMisuse = "ignore")
 
 #Number of simulated data sets for each condition
-n_data_sims <- 500
+n_data_sims <- 1
 
 #Setting generative fixed effects
 sim_fixed_intercept <- 5
@@ -321,8 +315,8 @@ sim_fixed_time_sq <- -1
 sim_fixed_time_cb <- -0.5
 
 #Setting generative AR and MA coefficients
-sim_ar_coef <- 0.5
-sim_ma_coef <- 0.5
+sim_ar_coef <- c(0.3, 0.7)
+sim_ma_coef <- c(0.3, 0.7)
 
 #Setting generative correlation structures
 sim_corr_struct <- c("ID", "AR(1)","ARMA(1,1)")
@@ -382,8 +376,6 @@ sim_parameter_grid <-
   unnest(Sim_Rand_Time_Cb_SD) %>% 
   unnest(Sim_Resid_SD) %>% 
   unnest(Sim_Corr_Struct) %>% 
-  #Adding IDs to each generative condition
-  mutate(Sim_Condition_ID = dplyr::row_number(), .before = Sim_Poly_Order) %>% 
   #Adding generative correlation order and ar/ma coefficients 
   mutate(Sim_Corr_Order = case_match(Sim_Corr_Struct,
                                      "ID" ~ list(c(0,0,0)),
@@ -395,6 +387,14 @@ sim_parameter_grid <-
          Sim_MA_Coef = case_match(Sim_Corr_Struct,
                                   "ID" ~ list(NULL),
                                   "ARMA(1,1)" ~ list(sim_ma_coef))) %>% 
+  #Unnesting AR and MA coefficients
+  unnest(Sim_AR_Coef, keep_empty = TRUE) %>% 
+  unnest(Sim_MA_Coef, keep_empty = TRUE) %>% 
+  #Replacing NAs with NULL in AR/MA Coef
+  mutate(Sim_AR_Coef = ifelse(is.na(Sim_AR_Coef), list(NULL), Sim_AR_Coef),
+         Sim_MA_Coef = ifelse(is.na(Sim_MA_Coef), list(NULL), Sim_MA_Coef)) %>% 
+  #Adding IDs to each generative condition
+  mutate(Sim_Condition_ID = dplyr::row_number(), .before = Sim_Poly_Order) %>% 
   #Repeating each condition however many times we want
   uncount(n_data_sims) %>% 
   mutate(Sim_Data_ID = row_number(), .before = Sim_Condition_ID) 
@@ -403,10 +403,14 @@ sim_parameter_grid <-
 tic()
 sim_data <-
   sim_parameter_grid %>% 
-  #This line samples n Condition_IDs 
-  #sample_n_of(5, Sim_Condition_ID) %>% 
+  #This line samples first half of data sets 
+  slice_head(prop = 0.1) %>% 
+  #This line samples the second half
+  #slice_tail(prop = 0.50) %>% 
   #Simulating data based on conditions in each row
-  mutate(Sim_Data = future_pmap(list(
+  mutate(Sim_Data = pmap(list(
+                              #Setting seed to the Sim_Data_ID
+                              Sim_Data_ID,
                               #Poly order
                               Sim_Poly_Order,
                               #Number of subjects
@@ -429,26 +433,28 @@ sim_data <-
                               Sim_Corr_Order,
                               Sim_AR_Coef,
                               Sim_MA_Coef),
-                         ~sim_function(poly_order = ..1,
-                                      n_subject = ..2,
-                                      n_time = ..3,
-                                      fixed_intercept = ..4,
-                                      fixed_time = ..5,
-                                      fixed_time_sq = ..6,
-                                      fixed_time_cb = ..7,
-                                      rand_intercept_sd = ..8,
-                                      rand_time_sd = ..9,
-                                      rand_time_sq_sd = ..10,
-                                      rand_time_cb_sd = ..11,
-                                      resid_sd = ..12, 
-                                      corr_mod_order = ..13,
-                                      ar_coef = ..14,
-                                      ma_coef = ..15)))
+                         ~sim_function(seed = ..1,
+                                      poly_order = ..2,
+                                      n_subject = ..3,
+                                      n_time = ..4,
+                                      fixed_intercept = ..5,
+                                      fixed_time = ..6,
+                                      fixed_time_sq = ..7,
+                                      fixed_time_cb = ..8,
+                                      rand_intercept_sd = ..9,
+                                      rand_time_sd = ..10,
+                                      rand_time_sq_sd = ..11,
+                                      rand_time_cb_sd = ..12,
+                                      resid_sd = ..13, 
+                                      corr_mod_order = ..14,
+                                      ar_coef = ..15,
+                                      ma_coef = ..16)))
 toc()
 
 sim_data_dir <- "/Users/Tanner/Desktop/Keith_and_Tanner_Correlation_Specification_Paper/Mixed_Model_Data_Sims"
 
-saveRDS(sim_data, file = paste0(sim_data_dir,"/Mixed_Model_Data_Sims_", format(Sys.Date(), "%Y_%m_%d"), ".rds"))
+#saveRDS(sim_data, file = paste0(sim_data_dir,"/Mixed_Model_Data_Sims_First_Half_", format(Sys.Date(), "%Y_%m_%d"), ".rds"))
+saveRDS(sim_data, file = paste0(sim_data_dir,"/Mixed_Model_Data_Sims_Second_Half_", format(Sys.Date(), "%Y_%m_%d"), ".rds"))
 
 
 tic()
@@ -471,8 +477,9 @@ sim_data_models <- sim_data %>%
   #of the random effect estimates and can produce NAs or singularities without throwing a warning/error in model fit
   mutate(Model_Result = 
            future_pmap(list(Model_Poly_Order, Model_Corr_Struct, Sim_Data), 
-                       ~ model_function(poly_order = ..1, corr_struct = ..2, data_set = ..3)),
-         Model_apVar = map(Model_Result, "apVar")) 
+                       ~ model_function(poly_order = ..1, corr_struct = ..2, data_set = ..3)
+         #Model_apVar = map(Model_Result, "apVar"
+                           )) 
 toc()
 
 sim_models_dir <- "/Users/Tanner/Desktop/Keith_and_Tanner_Correlation_Specification_Paper/Mixed_Model_Model_Sims"
